@@ -1,0 +1,82 @@
+name: Publish single-source personal portal
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '43 * * * *'
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ArchimeDAs0612/shenxinda-portfolio-website
+          ref: main
+      - name: Check whether the approved source changed
+        id: change
+        run: |
+          SOURCE_SHA=$(git rev-parse HEAD)
+          LIVE_SHA=$(curl --silent --fail https://archimedas0612.github.io/source-version.txt || true)
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$SOURCE_SHA" = "$LIVE_SHA" ]; then echo "needed=false" >> "$GITHUB_OUTPUT"; else echo "needed=true" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-node@v4
+        if: steps.change.outputs.needed == 'true'
+        with:
+          node-version: 24
+          cache: npm
+      - if: steps.change.outputs.needed == 'true'
+        run: npm ci
+      - if: steps.change.outputs.needed == 'true'
+        run: |
+          npm run lint
+          npm run typecheck
+          npm run verify:source
+          GITHUB_PAGES=true PORTFOLIO_ROOT=true npm run build
+      - name: Render and verify before publication
+        if: steps.change.outputs.needed == 'true'
+        run: |
+          GITHUB_PAGES=true PORTFOLIO_ROOT=true npm start &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/ --output dist/client/index.html; then break; fi
+            sleep 1
+          done
+          test -s dist/client/index.html
+          npm install --prefix "$RUNNER_TEMP/portfolio-browser" --no-package-lock playwright@1.58.2
+          "$RUNNER_TEMP/portfolio-browser/node_modules/.bin/playwright" install --with-deps chromium
+          PORTFOLIO_PLAYWRIGHT_MODULE="$RUNNER_TEMP/portfolio-browser/node_modules/playwright" node scripts/verify-browser.mjs http://127.0.0.1:3000/
+          echo '${{ steps.change.outputs.source_sha }}' > dist/client/source-version.txt
+          touch dist/client/.nojekyll
+      - uses: actions/configure-pages@v5
+        if: steps.change.outputs.needed == 'true'
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.change.outputs.needed == 'true'
+        with:
+          path: dist/client
+      - uses: actions/deploy-pages@v4
+        id: deployment
+        if: steps.change.outputs.needed == 'true'
+      - name: Check the actual public portal
+        if: steps.change.outputs.needed == 'true'
+        run: |
+          node scripts/verify-public.mjs
+          PORTFOLIO_PLAYWRIGHT_MODULE="$RUNNER_TEMP/portfolio-browser/node_modules/playwright" node scripts/verify-browser.mjs https://archimedas0612.github.io/
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.change.outputs.needed == 'true'
+        with:
+          name: portal-verification
+          path: outputs/refresh-20260930/
+          retention-days: 7
