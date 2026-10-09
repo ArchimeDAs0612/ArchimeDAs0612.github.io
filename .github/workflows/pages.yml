@@ -70,12 +70,22 @@ jobs:
         id: deployment
         if: steps.change.outputs.needed == 'true'
       - name: Check the actual public portal
-        if: steps.change.outputs.needed == 'true'
+        # Even an unchanged source still gets a read-only public check.
         run: |
+          if [ '${{ steps.change.outputs.needed }}' != 'true' ]; then
+            npm install --prefix "$RUNNER_TEMP/portfolio-browser" --no-package-lock playwright@1.58.2
+            "$RUNNER_TEMP/portfolio-browser/node_modules/.bin/playwright" install --with-deps chromium
+          fi
+          for attempt in {1..12}; do
+            LIVE_SHA=$(curl --fail --silent "https://archimedas0612.github.io/source-version.txt?check=$GITHUB_RUN_ID" || true)
+            if [ "$LIVE_SHA" = '${{ steps.change.outputs.source_sha }}' ]; then break; fi
+            sleep 5
+          done
+          test "$LIVE_SHA" = '${{ steps.change.outputs.source_sha }}'
           node scripts/verify-public.mjs
           PORTFOLIO_PLAYWRIGHT_MODULE="$RUNNER_TEMP/portfolio-browser/node_modules/playwright" node scripts/verify-browser.mjs https://archimedas0612.github.io/
       - uses: actions/upload-artifact@v4
-        if: always() && steps.change.outputs.needed == 'true'
+        if: always()
         with:
           name: portal-verification
           path: outputs/refresh-20260930/
